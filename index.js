@@ -1,68 +1,92 @@
 const { Resolver } = require("@parcel/plugin");
 const path = require("path");
-const nullthrows = require("nullthrows");
 const jsesc = require("jsesc");
 const { glob, normalizeSeparators } = require("@parcel/utils");
+
+const PROJECT_ROOT = process.cwd();
+const CONFIG_PATH = path.resolve(PROJECT_ROOT, "angular.templates.json");
+
+const loadConfig = async (inputFS) => {
+  const defaults = { templates: [], stripPaths: [] };
+  const config = {
+    ...defaults,
+    ...JSON.parse(await inputFS.readFile(CONFIG_PATH)),
+  };
+  config.stripPaths = config.stripPaths.map((p) => new RegExp(p, "gm"));
+
+  return config;
+};
 
 exports.default = new Resolver({
   async resolve({ specifier, options, dependency }) {
     if (specifier !== "templates") return null;
 
-    // This or options.projectRoot directly?
-    const projectRoot = path.dirname(
-      nullthrows(dependency.resolveFrom ?? dependency.sourcePath)
-    );
-
-    // Should come from a config somehow
-    let templateGlobs = [
-      "../../views/**/*.html",
-      "../../../node_modules/@navikt/**/*.html",
-    ];
-
-    const templateFile = path.resolve(__dirname, "templates.js");
-
+    let config;
     try {
-      const templateFiles = await findTemplateFiles(
-        templateGlobs,
-        projectRoot,
-        options.inputFS
-      );
-
-      const templateContents = await getTemplateContents(
-        templateFiles,
-        options.inputFS
-      );
-
-      const templateModule = createTemplateModule(
-        templateContents,
-        projectRoot
-      );
-
+      config = await loadConfig(options.inputFS);
+    } catch (e) {
       return {
-        filePath: templateFile,
-        code: templateModule,
-        invalidateOnFileChange: templateFiles,
-      };
-    } catch (err) {
-      return {
-        invalidateOnFileCreate: [{ filePath: templateFile }],
+        invalidateOnFileCreate: [{ filePath: CONFIG_PATH }],
       };
     }
+
+    const { templates, stripPaths } = config;
+
+    const templateGlobs = templates.map((t) => path.resolve(PROJECT_ROOT, t));
+    const templateModuleFile = path.resolve(PROJECT_ROOT, "templates.js");
+
+    const templateFiles = await findTemplateFiles(
+      templateGlobs,
+      options.inputFS
+    );
+
+    const templateContents = await getTemplateContents(
+      templateFiles,
+      options.inputFS,
+      stripPaths
+    );
+
+    const templateModule = createTemplateModule(templateContents, PROJECT_ROOT);
+
+    return {
+      filePath: templateModuleFile,
+      code: templateModule,
+      canDefer: false,
+      invalidateOnFileChange: [...templateFiles, CONFIG_PATH],
+      invalidateOnFileCreate: templateGlobs.map((g) => ({ glob: g })),
+    };
   },
 });
 
-const getTemplateContents = (templateFiles, inputFS) =>
+const findTemplateFiles = (templateGlobs, inputFS) =>
   Promise.all(
-    templateFiles.map((file) =>
-      inputFS.readFile(file).then((value) => [file, value])
-    )
+    templateGlobs.map((templateGlob) => {
+      let normalized = normalizeSeparators(templateGlob);
+      return glob(normalized, inputFS, {
+        onlyFiles: true,
+      });
+    })
+  ).then((foundFiles) => foundFiles.flat());
+
+const getTemplateContents = (templateFiles, inputFS, stripPaths) => {
+  return Promise.all(
+    templateFiles.map((file) => {
+      return inputFS.readFile(file).then((value) => {
+        file = file.replace(PROJECT_ROOT, "");
+
+        // Strip out unwanted parts of the path
+        stripPaths.forEach((p) => (file = file.replace(p, "")));
+
+        return [file, value];
+      });
+    })
   );
+};
 
 const createTemplateModule = (templateFiles, projectRoot) => {
   const head = `angular.module("templates", []).run(["$templateCache", function ($templateCache) {`;
   const body = templateFiles
     .map(([file, value]) => {
-      file = file.replace(projectRoot, "");
       value = jsesc(value.toString());
 
       return `$templateCache.put("${file}", '${value}')`;
@@ -72,14 +96,3 @@ const createTemplateModule = (templateFiles, projectRoot) => {
 
   return head + body + footer;
 };
-const findTemplateFiles = (templateGlobs, projectRoot, inputFS) =>
-  Promise.all(
-    templateGlobs.map((templateGlob) => {
-      templateGlob = path.resolve(projectRoot, templateGlob);
-
-      let normalized = normalizeSeparators(templateGlob);
-      return glob(normalized, inputFS, {
-        onlyFiles: true,
-      });
-    })
-  ).then((foundFiles) => foundFiles.flat());
