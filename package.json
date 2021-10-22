@@ -12,6 +12,7 @@
     "type": "git",
     "url": "https://github.com/navikt/parcel-resolver-angular-templatecache"
   },
+  "files": [],
   "engines": {
     "parcel": "2.x"
   },
